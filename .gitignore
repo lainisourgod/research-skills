@@ -1,0 +1,22 @@
+# python
+venv
+.venv
+__pycache__
+*.pyc
+.ipynb_checkpoints
+*.egg-info
+
+# mac
+.DS_store
+
+# editor
+.vscode
+.vim
+
+# project
+/logs
+/data
+/wandb
+
+# credentials
+.env
