@@ -93,8 +93,13 @@ def read_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     log("Labels imbalance")
     log(labels_df.apply(lambda x: pd.value_counts(x, normalize=True)).round(2).T)
 
+    # Drop ill-defined columns
     train_counts = train_df.describe(include="all").loc["count"]
     well_defined_columns = train_counts[train_counts > 7000].index
+    # Drop columns with value `1` for all records
+    well_defined_columns = well_defined_columns.drop(
+        ["n_0047", "n_0050", "n_0052", "n_0061", "n_0075", "n_0091"]
+    )
     well_done_df = train_df[well_defined_columns]
 
     # We should sort columns here because ColumnTransformer will mess column order
@@ -165,7 +170,11 @@ if __name__ == "__main__":
         categorical_features=np.where(data.dtypes == object)[0],
         numerical_features=np.where(data.dtypes != object)[0],
     )
-    pipeline.fit(train_features, train_targets)
+
+    for i in range(10):
+        # mask random features to simulate prod situations
+        # where many columns may be NaN
+        pipeline.fit(train_features, train_targets)
 
     valid_preds = pipeline.predict(valid_features)
     valid_probas = pipeline.predict_proba(valid_features)
