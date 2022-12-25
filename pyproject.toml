@@ -16,6 +16,7 @@ dependencies = [
     "plotly==5.11.0",
     "matplotlib==3.6.2",
     "seaborn==0.12.1",
+    "catboost==1.1.1",
 ]
 
 [tool.setuptools]
