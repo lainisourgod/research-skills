@@ -5,20 +5,71 @@ from typing import Iterable
 
 from ruamel.yaml import YAML
 
-from src.config import log
+from src.config import log, rule
 
 yaml = YAML()
 
 
 import numpy as np
 import pandas as pd
+from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.multioutput import MultiOutputClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
 
 seed = 42
+
+
+def get_pipeline(
+    categorical_features: np.ndarray, numerical_features: np.ndarray
+) -> Pipeline:
+    """
+    Arguments:
+        categorical_features, numerical_features: arrays with indices of columns
+        that are categorical/numerical. e.g. `[0, 15, 35, 36]`
+    Returns:
+        sklearn.Pipeline with following steps:
+        1. impute NaNs. mean for numerical and most frequent for categorical
+        2. one-hot encode categorical features
+        3. apply LogisticRegression with default parameters
+    """
+    imputer = ColumnTransformer(
+        (
+            (
+                "impute_numerical",
+                SimpleImputer(strategy="mean"),
+                numerical_features,
+            ),
+            (
+                "impute_categorical",
+                SimpleImputer(strategy="most_frequent"),
+                categorical_features,
+            ),
+        )
+    )
+    one_hot_encoder = ColumnTransformer(
+        (
+            (
+                "inner",
+                OneHotEncoder(handle_unknown="ignore"),
+                categorical_features,
+            ),
+        ),
+        remainder="passthrough",
+    )
+    model = MultiOutputClassifier(LogisticRegression(solver="liblinear"))
+
+    return Pipeline(
+        (
+            ("impute", imputer),
+            ("one_hot_categorical", one_hot_encoder),
+            ("model", model),
+        )
+    )
 
 
 def read_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -35,51 +86,35 @@ def read_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     train_df = pd.read_csv("./data/prepared/train.csv", low_memory=False).drop(
         columns=["id"]
     )
-    train_labels_df = pd.read_csv(
-        "./data/prepared/train_labels.csv", low_memory=False
-    ).drop(columns=["id"])
+    labels_df = pd.read_csv("./data/prepared/train_labels.csv", low_memory=False).drop(
+        columns=["id"]
+    )
 
     log("Labels imbalance")
-    log(train_labels_df.apply(lambda x: pd.value_counts(x, normalize=True)).round(2))
+    log(labels_df.apply(lambda x: pd.value_counts(x, normalize=True)).round(2).T)
 
     train_counts = train_df.describe(include="all").loc["count"]
     well_defined_columns = train_counts[train_counts > 7000].index
     well_done_df = train_df[well_defined_columns]
 
-    log(f"Selected {len(well_defined_columns)} from {len(train_counts)} columns")
-
-    # Convert categorical. `nan` converts to [0, 0, ..., 0]
-    well_done_df = pd.get_dummies(well_done_df)
-
-    # TODO:!!!
-    # simple imputer should be learned only on train, not valid (️️️️️️🤦‍♂️)
-    # maybe put it into pipeline?
-
-    # Impute nans for numerical features
-    imputer = SimpleImputer(strategy="mean")
-    imputer.fit(well_done_df)
-    well_done_df = pd.DataFrame(
-        columns=well_done_df.columns,
-        data=imputer.transform(well_done_df),
+    # We should sort columns here because ColumnTransformer will mess column order
+    # So the categorical features indices will be same before and after imputing
+    well_done_df = well_done_df.reindex(
+        columns=sorted(well_done_df.columns, key=lambda col: well_done_df.dtypes[col])
     )
+
+    log(f"Selected {len(well_defined_columns)} from {len(train_counts)} columns")
 
     test_df = pd.read_csv("./data/prepared/test.csv", low_memory=False)
 
     test_id = test_df["id"]
     test_df = test_df[well_defined_columns]
 
-    test_df = pd.get_dummies(test_df)
-
     # We can miss some columns from train, as well as have some new
-    test_df = test_df.reindex(columns=well_done_df.columns, fill_value=0)
-
-    test_df = pd.DataFrame(
-        columns=test_df.columns,
-        data=imputer.transform(test_df),
-    )
+    test_df = test_df.reindex(columns=well_done_df.columns)
     test_df["id"] = test_id
 
-    return well_done_df, train_labels_df, test_df
+    return well_done_df, labels_df, test_df
 
 
 def compute_metrics(
@@ -88,7 +123,7 @@ def compute_metrics(
     """
     Compute LogLoss and ROC AUC.
 
-    Returns pd.DataFrame with dimensions [len(labels), len(metrics) (2)]
+    Returns pd.DataFrame with dimensions [len(labels) + 1, 2]
     """
     metrics = pd.DataFrame(index=labels)
 
@@ -97,7 +132,7 @@ def compute_metrics(
             log_loss(targets.iloc[:, label_id], probas[:, label_id]),
             2,
         )
-        for label_id, label in enumerate(train_labels_df.columns)
+        for label_id, label in enumerate(labels)
     ]
 
     metrics["roc_auc"] = roc_auc_score(
@@ -118,26 +153,27 @@ if __name__ == "__main__":
     log("Current exp dir: ", log_dir)
 
     log("Reading data")
-    well_done_df, train_labels_df, test_df = read_data()
+    data, labels, test_df = read_data()
+    train_features, valid_features, train_targets, valid_targets = train_test_split(
+        data, labels, random_state=seed, test_size=0.2
+    )
+    rule()
 
     # Train and validate to get metrics
     log("Training")
-    train_features, valid_features, train_targets, valid_targets = train_test_split(
-        well_done_df, train_labels_df, random_state=seed, test_size=0.2
+    pipeline = get_pipeline(
+        categorical_features=np.where(data.dtypes == object)[0],
+        numerical_features=np.where(data.dtypes != object)[0],
     )
+    pipeline.fit(train_features, train_targets)
 
-    # We need MultiOutputClassifier becase CalibratedClassifierCV only outputs one label
-    clf = MultiOutputClassifier(
-        LogisticRegression(solver="liblinear", random_state=seed)
-    ).fit(well_done_df, train_labels_df)
-
-    valid_preds = clf.predict(valid_features)
-    valid_probas = clf.predict_proba(valid_features)
+    valid_preds = pipeline.predict(valid_features)
+    valid_probas = pipeline.predict_proba(valid_features)
     valid_probas = np.transpose([y_pred[:, 1] for y_pred in valid_probas])
 
     log("Computing metrics on valid set")
     metrics = compute_metrics(
-        labels=train_labels_df.columns,
+        labels=labels.columns,
         targets=valid_targets,
         preds=valid_preds,
         probas=valid_probas,
@@ -147,18 +183,16 @@ if __name__ == "__main__":
     log("Saving metrics")
     with open(log_dir / "metrics.yaml", "w") as fd:
         yaml.dump(metrics.to_dict(), fd)
+    rule()
 
     log("Training prod model on all data")
-    # Use all data to train prod model
-    clf = MultiOutputClassifier(
-        LogisticRegression(solver="liblinear", random_state=seed)
-    ).fit(well_done_df, train_labels_df)
+    pipeline.fit(data, labels)
 
     log("Exporting test scores")
-    test_probas = clf.predict_proba(test_df.drop(columns=["id"]))
+    test_probas = pipeline.predict_proba(test_df.drop(columns=["id"]))
     test_probas = np.transpose([y_pred[:, 1] for y_pred in test_probas])
     test_probas = pd.DataFrame(
-        columns=[f"score_{label}" for label in train_labels_df.columns],
+        columns=[f"score_{label}" for label in labels.columns],
         data=test_probas,
     )
     test_probas = test_probas.round(3)
@@ -166,4 +200,4 @@ if __name__ == "__main__":
 
     test_probas.to_csv(log_dir / "problem_test_labels.csv", index=False)
     with (log_dir / "model.pickle").open("wb") as model_fd:
-        pickle.dump(clf, model_fd)
+        pickle.dump(pipeline, model_fd)
