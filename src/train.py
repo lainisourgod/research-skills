@@ -94,17 +94,20 @@ def compute_metrics(
 
     metrics["log_loss"] = [
         round(
-            log_loss(valid_targets.iloc[:, label_id], valid_probas[:, label_id]),
+            log_loss(targets.iloc[:, label_id], probas[:, label_id]),
             2,
         )
         for label_id, label in enumerate(train_labels_df.columns)
     ]
 
     metrics["roc_auc"] = roc_auc_score(
-        valid_targets,
-        valid_probas,
+        targets,
+        probas,
         average=None,
     )
+
+    metrics.loc["mean", "log_loss"] = metrics["log_loss"].mean()
+    metrics.loc["mean", "roc_auc"] = metrics["roc_auc"].mean()
 
     return metrics.round(2)
 
